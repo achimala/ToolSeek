@@ -6,6 +6,9 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+import io
+import traceback
+from contextlib import redirect_stdout
 
 load_dotenv()
 
@@ -25,6 +28,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def run_python(src: str, env: dict[str, object]) -> str:
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            # Try eval first so `print(<expr>)` isn't required
+            try:
+                result = eval(src, env)
+                if result is not None:
+                    print(repr(result))
+            except SyntaxError:
+                exec(src, env)
+    except Exception:
+        traceback.print_exc(file=buf)
+    return buf.getvalue().rstrip() or "(no output)"
 
 
 @app.post("/v1/chat/completions")
@@ -53,7 +72,7 @@ async def chat_completions(request: Request):
             status_code=400, detail="only streaming is currently supported"
         )
 
-    wrapped_final_message = {
+    user_message = {
         "role": "user",
         "content": f"""
 This is a system message, not written by the user.
@@ -64,18 +83,15 @@ You don't need to think or plan before using the tool. Use it first, then see th
 
 IMPORTANT: You must output <python> tags INSIDE your think section, BEFORE escaping to the user answer.
 The system can only execute code BEFORE you complete the thinking section -- this is now part of your reasoning, not part of the answer.
+NEVER output the string "<python>" unless you're using the tool. Otherwise you'll confuse the system.
 
 ---
 
 {messages[-1]["content"]}
         """.strip(),
     }
-    injected_messages = messages[:-1] + [
-        wrapped_final_message,
-        {
-            "role": "assistant",
-            "prefix": True,
-            "content": """
+
+    prefix = """
 <think>
 Okay, so apparently I can use Python inside this section. Let me try it:
 <python>
@@ -85,60 +101,135 @@ print("Hello, world!")
 Hello, world!
 </output>
 Wow, it works! Okay, so let's look at the user's query and see how I can help them using this tool.
-""".strip(),
-        },
-    ]
+    """.strip()
 
     # Forward parameters directly
     params = body.copy()
-    params["messages"] = injected_messages
     params["model"] = "deepseek-reasoner"
     params["stream"] = True
 
+    py_env: dict[str, object] = {}
+    is_thinking = True
+    needs_restart = False
+
     async def event_stream():
-        buffer = ""
-        try:
-            async for chunk in await openai.chat.completions.create(**params):
-                data = chunk.to_dict()
-                # Update buffer with new content
-                for choice in data.get("choices", []):
-                    delta = choice.get("delta", {})
-                    text = delta.get("content", "")
-                    if text:
-                        buffer += text
+        nonlocal is_thinking
+        nonlocal needs_restart
+        nonlocal prefix
 
-                        # Look for complete Python code blocks
-                        while True:
-                            match = re.search(
-                                r"<python>(.*?)</python>", buffer, re.DOTALL
-                            )
-                            if not match:
+        # Tool loop - we will re-run each time the model produces a tool call.
+        # We run the code, update the prefix with the output, then restart with the new prefix.
+        while True:
+            buffer = ""
+            already_sent = ""
+            injected_messages = messages[:-1] + [
+                user_message,
+                {
+                    "role": "assistant",
+                    "prefix": True,
+                    "content": prefix,
+                },
+            ]
+            params["messages"] = injected_messages
+
+            try:
+                async for chunk in await openai.chat.completions.create(**params):
+                    data = chunk.to_dict()
+
+                    # No longer in CoT -> nothing to do, just forward the data
+                    if not is_thinking:
+                        yield f"data: {json.dumps(data)}\n\n"
+                        continue
+
+                    # Update buffer with new content
+                    choices = data.get("choices")
+                    if choices:
+                        delta = choices[0].get("delta", {})
+
+                        if text := delta.get("content"):
+                            buffer += text
+
+                            # Emit the delta to the client, up to and including any </python> tags
+                            # Process the buffer to handle Python code blocks
+                            if "</python>" in buffer:
+                                # Only yield up to the </python> tag, the rest will be processed
+                                parts = buffer.split("</python>", 1)
+                                text_to_yield = parts[0] + "</python>"
+                                # Only send what hasn't been sent yet
+                                if text_to_yield.startswith(already_sent):
+                                    new_content = text_to_yield[len(already_sent) :]
+                                    if new_content:
+                                        yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': new_content, 'content': ''}}]})}\n\n"
+                                        already_sent += new_content
+                                        prefix += new_content
+                            elif "</think>" in buffer:
+                                # Only yield up to the </think> tag
+                                parts = buffer.split("</think>", 1)
+                                text_to_yield = parts[0]
+                                # Only send what hasn't been sent yet
+                                if text_to_yield.startswith(already_sent):
+                                    new_content = text_to_yield[len(already_sent) :]
+                                    if new_content:
+                                        yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': new_content, 'content': ''}}]})}\n\n"
+                                        already_sent += new_content
+                                        prefix += new_content
+                                # We're done with the thinking section
+                                is_thinking = False
+                                # For simplicity for now, we just restart the tool loop
+                                prefix += text_to_yield + "</think>\n"
+                                needs_restart = True
                                 break
+                            else:
+                                yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': text, 'content': ''}}]})}\n\n"
+                                already_sent += text
+                                prefix += text
+                                continue
 
-                            code = match.group(1)
-                            print(f"Extracted python code: {code}")
+                            # Look for complete Python code block
+                            # Find the last occurrence of <python>...</python> in the buffer
+                            last_start = (
+                                buffer.rindex("<python>")
+                                if "<python>" in buffer
+                                else -1
+                            )
+                            last_end = (
+                                buffer.rindex("</python>")
+                                if "</python>" in buffer
+                                else -1
+                            )
+                            if (
+                                last_start == -1
+                                or last_end == -1
+                                or last_start > last_end
+                            ):
+                                continue
 
-                            # Remove the extracted code block from buffer
-                            start, end = match.span()
-                            buffer = buffer[:start] + buffer[end:]
+                            # Extract the content between the last <python> and </python> tags
+                            code = buffer[last_start + len("<python>") : last_end]
 
-                yield f"data: {json.dumps(data)}\n\n"
+                            output = run_python(code, py_env)
+                            formatted_output = f"\n<output>\n{output}\n</output>"
+                            prefix += formatted_output
 
-            # Check for any remaining code in buffer at end of stream
-            while True:
-                match = re.search(r"<python>(.*?)</python>", buffer, re.DOTALL)
-                if not match:
-                    break
-                code = match.group(1)
-                print(f"Extracted python code at end: {code}")
-                start, end = match.span()
-                buffer = buffer[:start] + buffer[end:]
+                            # Yield the output to the client
+                            yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': formatted_output, 'content': ''}}]})}\n\n"
+                            already_sent += formatted_output
 
-            # signal end of stream
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            # In case of error, send error message and close
-            err = {"error": {"message": str(e)}}
-            yield f"data: {json.dumps(err)}\n\n"
+                            # Restart with the new prefix
+                            needs_restart = True
+                            break
+
+                if needs_restart:
+                    needs_restart = False
+                    continue
+
+                # signal end of stream
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                # In case of error, send error message and close
+                err = {"error": {"message": str(e)}}
+                yield f"data: {json.dumps(err)}\n\n"
+                yield "data: [DONE]\n\n"
+                break
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

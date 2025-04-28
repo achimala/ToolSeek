@@ -97,23 +97,25 @@ Here is the user query, which you should solve using code execution:
 Okay, so apparently I can use Python inside this section. Let me try it:
 
 <python>
-print("Hello, world!")
+def get_num():
+    return 4723928746
+print("x =", get_num())
 </python>
 <output>
-Hello, world!
+x = 4723928746
 </output>
 
 Wow, it works! So I can run code in here now, which is very powerful. I should use this as much as I can. Okay, so let's look at the user's query and see how I can help them using code execution.
 
 Since the instructions said to not worry about efficiency too much and use the tool frequently and liberally, I'll do that and see what happens. Let's see if math works:
 <python>
-print(21394872138 + 4723928746)
+print(21394872138 + get_num())
 </python>
 <output>
 26118800884
 </output>
 
-Perfect, that is much more efficient than me doing it myself by hand. This will save a lot of time, so I should use it as much as possible.
+Perfect. It works, and I can reference earlier variables and functions. That is much more efficient than me doing it myself by hand. This will save a lot of time, so I should use it as much as possible.
 
 Okay, let's start working on the user's query with this. Let me write a first attempt in <python> tags, then I'll see the results and iterate.
 

@@ -19,7 +19,13 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
-# ───────────────────────────── config ───────────────────────────── #
+from pygments import highlight
+from pygments.lexers import PythonLexer
+from pygments.formatters import Terminal256Formatter
+
+_PY_LEXER = PythonLexer(ensurenl=False, stripnl=False)
+_FMT = Terminal256Formatter(style="monokai")  # any 256-colour style works
+
 API_URL = os.getenv("LLM_API_URL", "http://localhost:8000/v1/chat/completions")
 HISTORY_FILE = Path.home() / ".toolseek_cli_history"
 SLASH_CMDS = ("clear", "exit", "quit", "help")
@@ -31,8 +37,8 @@ CLI_STYLE = Style.from_dict(
         "prompt": "bold cyan",
         "cmd": "ansiyellow",
         "handle": "bold fg:#b434eb",
-        "python": "fg:#00af5f",  # green-ish for code
-        "output": "fg:#ffaf00",  # orange-ish for run-output
+        "python": "fg:#00af5f",
+        "output": "fg:#ffaf00",
     }
 )
 
@@ -103,48 +109,70 @@ def handle_slash(cmd: str, hist: ChatHist) -> bool:
 
 
 class TagStreamer:
-    """Incrementally colourises <python>...</python> and <output>...</output> blocks."""
+    """
+    Incrementally detects <python>, </python>, <output>, </output> tags in a
+    byte-by-byte stream, keeps track of which block we’re in, and returns
+    tuples (text, kind) where kind is:
+        • "python" - inside a <python> … </python> block
+        • "output" – inside an <output> … </output> block
+        • None     – tag lines themselves, or normal reasoning text
+    """
 
-    TAGS = {"python", "output"}
+    _TAG_RX = re.compile(r"<(/?)(python|output)>", re.IGNORECASE)
+    _VALID = {"python", "output"}
 
     def __init__(self):
-        self.buf: list[str] = []  # holds characters crossing chunk boundaries
-        self.active: str | None = None  # current open tag
+        self._buf: str = ""
+        self.active: str | None = None
 
-    def feed(self, text: str) -> list[tuple[str, str | None]]:
-        """
-        Returns a list of (segment, style_name) tuples ready for printing.
-        style_name is None for normal text / reasoning.
-        """
-        self.buf.append(text)
-        data = "".join(self.buf)
+    def feed(self, chunk: str) -> list[tuple[str, str | None]]:
+        self._buf += chunk
         out: list[tuple[str, str | None]] = []
-        i = 0
-        while i < len(data):
-            if data.startswith("<", i):
-                # try to see if we have a full tag already
-                j = data.find(">", i + 1)
-                if j == -1:  # tag not complete yet → keep in buffer
-                    break
-                tag = data[i + 1 : j].strip().lower().lstrip("/")
-                closing = data[i + 1] == "/"
-                if tag in self.TAGS:
-                    # flush text *before* tag
-                    if i:
-                        out.append((data[:i], self.active))
-                    # update state
-                    self.active = None if closing else tag
-                    # cut consumed piece
-                    data = data[j + 1 :]
-                    i = 0
-                    continue
-            i += 1
-        # whatever is left without incomplete tag
-        if data:
-            out.append((data, self.active))
-            self.buf = []
-        else:
-            self.buf = [data]  # keep remainder (incomplete tag) for next feed
+
+        # 1) pull out all *complete* tags first
+        while True:
+            m = self._TAG_RX.search(self._buf)
+            if not m:
+                break
+            start, end = m.span()
+
+            # emit text before the tag under current style
+            if start:
+                out.append((self._buf[:start], self.active))
+
+            # emit the tag itself as neutral (None)
+            tag_txt = self._buf[start:end]
+            out.append((tag_txt, None))
+
+            # update active block
+            closing, name = m.groups()
+            name = name.lower()
+            if name in self._VALID:
+                self.active = None if closing else name
+
+            self._buf = self._buf[end:]
+
+        # 2) flush any trailing text that we *know* isn't the start of a real tag
+        if self._buf:
+            idx = self._buf.find("<")
+            if idx >= 0:
+                # if next char after '<' can't start a tag, dump everything
+                if idx + 1 >= len(self._buf) or not re.match(
+                    r"[\/A-Za-z]", self._buf[idx + 1]
+                ):
+                    out.append((self._buf, self.active))
+                    self._buf = ""
+                else:
+                    # possible real tag: emit text up to that '<', keep the rest buffered
+                    safe = self._buf[:idx]
+                    if safe:
+                        out.append((safe, self.active))
+                    self._buf = self._buf[idx:]
+            else:
+                # no '<' at all → safe to flush all
+                out.append((self._buf, self.active))
+                self._buf = ""
+
         return out
 
 
@@ -204,23 +232,26 @@ def main() -> None:
                 hist.append({"role": "user", "content": user_msg})
                 payload = {"messages": hist, "stream": True}
 
-                stop_spin = threading.Event()
-                th = threading.Thread(target=spinner, args=(stop_spin,), daemon=True)
-                th.start()
+                spin_evt = threading.Event()
+                spin_thread = threading.Thread(
+                    target=spinner, args=(spin_evt,), daemon=True
+                )
+                spin_thread.start()
 
                 try:
                     resp = requests.post(API_URL, json=payload, stream=True, timeout=60)
                     resp.raise_for_status()
                 except Exception as e:
-                    stop_spin.set()
-                    th.join()
+                    spin_evt.set()
+                    spin_thread.join()
                     display(f"\nRequest error: {e}\n")
                     continue
 
                 assistant_accum = ""
-                has_finished_reasoning = False
-                has_started_streaming = False
+                reasoning_done = False
+                started = False
                 tagger = TagStreamer()
+
                 for line in resp.iter_lines():
                     if not line:
                         continue
@@ -236,12 +267,11 @@ def main() -> None:
                     except json.JSONDecodeError:
                         continue
 
-                    # ready to start printing assistant reply
-                    if not has_started_streaming:
-                        stop_spin.set()
-                        th.join()
+                    if not started:
+                        spin_evt.set()
+                        spin_thread.join()
                         display(FormattedText([("class:prompt", "AI"), ("", ": ")]))
-                        has_started_streaming = True
+                        started = True
 
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     reasoning = delta.get("reasoning_content")
@@ -249,27 +279,22 @@ def main() -> None:
 
                     if reasoning:
                         for seg, kind in tagger.feed(reasoning):
-                            style_class = (
-                                "python"
-                                if kind == "python"
-                                else "output" if kind == "output" else "reason"
-                            )
-                            display(FormattedText([(f"class:{style_class}", seg)]))
+                            if kind == "python":
+                                display(ANSI(highlight(seg, _PY_LEXER, _FMT)))
+                            else:
+                                style = "output" if kind == "output" else "reason"
+                                display(FormattedText([(f"class:{style}", seg)]))
                         assistant_accum += reasoning
+
                     if content:
-                        if not has_finished_reasoning:
-                            has_finished_reasoning = True
+                        if not reasoning_done:
+                            reasoning_done = True
                             display(FormattedText([("class:reason", "\n")]))
                         for seg, kind in tagger.feed(content):
-                            style_class = (
-                                "python"
-                                if kind == "python"
-                                else "output" if kind == "output" else ""
-                            )
-                            display(FormattedText([(f"class:{style_class}", seg)]))
+                            display(FormattedText([(f"class:output", seg)]))
                         assistant_accum += content
 
-                display("\n")  # newline after assistant finishes
+                display("\n")
                 hist.append({"role": "assistant", "content": assistant_accum})
 
     except KeyboardInterrupt:

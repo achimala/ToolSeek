@@ -193,9 +193,8 @@ Okay, let's start working on the user's query with this. Let me write a first at
                                 for i in range(1, len("</think") + 1)
                             ):
                                 # If buffer ends with a partial "</think" tag, we don't want to send any of those tokens, only tokens prior to that
-                                # Check if the text contains part of the closing tag
                                 # Find the position where the partial closing tag starts
-                                for i in range(1, len("</think") + 1):
+                                for i in range(len("</think"), 0, -1):
                                     if buffer.endswith("</think"[:i]):
                                         # Yield everything up to the start of the partial tag
                                         text_to_yield = buffer[:-i]
@@ -208,9 +207,9 @@ Okay, let's start working on the user's query with this. Let me write a first at
                                                 yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': new_content, 'content': ''}}]})}\n\n"
                                                 already_sent += new_content
                                                 prefix += new_content
+                                        # Queue the partial closing tag in maybe_send
+                                        maybe_send = buffer[-i:]
                                         break
-                                # Skip until the closing tag is complete
-                                maybe_send += text
                                 continue
                             elif "</think>" in buffer:
                                 # Only yield up to the </think> tag

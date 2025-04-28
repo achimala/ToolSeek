@@ -132,9 +132,11 @@ Wow, it works! Okay, so let's look at the user's query and see how I can help th
             ]
             params["messages"] = injected_messages
 
+            print(f"Making request with params: {params}")
             try:
                 async for chunk in await openai.chat.completions.create(**params):
                     data = chunk.to_dict()
+                    print(f"Received chunk: {data}")
 
                     # No longer in CoT -> nothing to do, just forward the data
                     if not is_thinking:
@@ -162,6 +164,29 @@ Wow, it works! Okay, so let's look at the user's query and see how I can help th
                                         yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': new_content, 'content': ''}}]})}\n\n"
                                         already_sent += new_content
                                         prefix += new_content
+                            elif any(
+                                buffer.endswith("</think"[:i])
+                                for i in range(1, len("</think") + 1)
+                            ):
+                                # If buffer ends with a partial "</think" tag, we don't want to send any of those tokens, only tokens prior to that
+                                # Check if the text contains part of the closing tag
+                                # Find the position where the partial closing tag starts
+                                for i in range(1, len("</think") + 1):
+                                    if buffer.endswith("</think"[:i]):
+                                        # Yield everything up to the start of the partial tag
+                                        text_to_yield = buffer[:-i]
+                                        # Only send what hasn't been sent yet
+                                        if text_to_yield.startswith(already_sent):
+                                            new_content = text_to_yield[
+                                                len(already_sent) :
+                                            ]
+                                            if new_content:
+                                                yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': new_content, 'content': ''}}]})}\n\n"
+                                                already_sent += new_content
+                                                prefix += new_content
+                                        break
+                                # Skip until the closing tag is complete
+                                continue
                             elif "</think>" in buffer:
                                 # Only yield up to the </think> tag
                                 parts = buffer.split("</think>", 1)

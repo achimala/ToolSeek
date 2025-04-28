@@ -48,6 +48,11 @@ async def chat_completions(request: Request):
                 status_code=400, detail="system messages are currently not supported"
             )
 
+    if not body.get("stream", False):
+        raise HTTPException(
+            status_code=400, detail="only streaming is currently supported"
+        )
+
     wrapped_final_message = {
         "role": "user",
         "content": f"""
@@ -88,61 +93,52 @@ Wow, it works! Okay, so let's look at the user's query and see how I can help th
     params = body.copy()
     params["messages"] = injected_messages
     params["model"] = "deepseek-reasoner"
+    params["stream"] = True
 
-    stream = params.get("stream", False)
-
-    if stream:
-
-        async def event_stream():
-            buffer = ""
-            try:
-                async for chunk in await openai.chat.completions.create(**params):
-                    data = chunk.to_dict()
-                    # Update buffer with new content
-                    for choice in data.get("choices", []):
-                        delta = choice.get("delta", {})
-                        text = delta.get("content", "")
-                        if text:
-                            buffer += text
-
-                            # Look for complete Python code blocks
-                            while True:
-                                match = re.search(
-                                    r"<python>(.*?)</python>", buffer, re.DOTALL
-                                )
-                                if not match:
-                                    break
-
-                                code = match.group(1)
-                                print(f"Extracted python code: {code}")
-
-                                # Remove the extracted code block from buffer
-                                start, end = match.span()
-                                buffer = buffer[:start] + buffer[end:]
-
-                    yield f"data: {json.dumps(data)}\n\n"
-
-                # Check for any remaining code in buffer at end of stream
-                while True:
-                    match = re.search(r"<python>(.*?)</python>", buffer, re.DOTALL)
-                    if not match:
-                        break
-                    code = match.group(1)
-                    print(f"Extracted python code at end: {code}")
-                    start, end = match.span()
-                    buffer = buffer[:start] + buffer[end:]
-
-                # signal end of stream
-                yield "data: [DONE]\n\n"
-            except Exception as e:
-                # In case of error, send error message and close
-                err = {"error": {"message": str(e)}}
-                yield f"data: {json.dumps(err)}\n\n"
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-    else:
+    async def event_stream():
+        buffer = ""
         try:
-            response = await openai.chat.completions.create(**params)
-            return JSONResponse(content=response.to_dict())
+            async for chunk in await openai.chat.completions.create(**params):
+                data = chunk.to_dict()
+                # Update buffer with new content
+                for choice in data.get("choices", []):
+                    delta = choice.get("delta", {})
+                    text = delta.get("content", "")
+                    if text:
+                        buffer += text
+
+                        # Look for complete Python code blocks
+                        while True:
+                            match = re.search(
+                                r"<python>(.*?)</python>", buffer, re.DOTALL
+                            )
+                            if not match:
+                                break
+
+                            code = match.group(1)
+                            print(f"Extracted python code: {code}")
+
+                            # Remove the extracted code block from buffer
+                            start, end = match.span()
+                            buffer = buffer[:start] + buffer[end:]
+
+                yield f"data: {json.dumps(data)}\n\n"
+
+            # Check for any remaining code in buffer at end of stream
+            while True:
+                match = re.search(r"<python>(.*?)</python>", buffer, re.DOTALL)
+                if not match:
+                    break
+                code = match.group(1)
+                print(f"Extracted python code at end: {code}")
+                start, end = match.span()
+                buffer = buffer[:start] + buffer[end:]
+
+            # signal end of stream
+            yield "data: [DONE]\n\n"
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            # In case of error, send error message and close
+            err = {"error": {"message": str(e)}}
+            yield f"data: {json.dumps(err)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

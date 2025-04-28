@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,19 +38,85 @@ async def chat_completions(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid JSON") from e
 
+    # Validate and inject special system message
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="`messages` field must be a list")
+    for m in messages:
+        if m.get("role") == "system":
+            raise HTTPException(
+                status_code=400, detail="system messages are currently not supported"
+            )
+
+    wrapped_final_message = {
+        "role": "user",
+        "content": f"""
+This is a system message, not written by the user.
+You have a special Python tool which lets you run Python code by outputting <python> tags inside your think section.
+The code will be extracted and executed, and you will see the output immediately.
+You should use this whenever possible, as it's very fast and precise.
+You don't need to think or plan before using the tool. Use it first, then see the results and iterate.
+
+IMPORTANT: You must output <python> tags INSIDE your think section, BEFORE escaping to the user answer.
+The system can only execute code BEFORE you complete the thinking section -- this is now part of your reasoning, not part of the answer.
+
+---
+
+{messages[-1]["content"]}
+        """.strip(),
+    }
+    injected_messages = messages[:-1] + [wrapped_final_message]
+
     # Forward parameters directly
     params = body.copy()
+    params["messages"] = injected_messages
     params["model"] = "deepseek-reasoner"
+
+    print(f"Sending params: {params}")
 
     stream = params.get("stream", False)
 
     if stream:
 
         async def event_stream():
+            buffer = ""
             try:
                 async for chunk in await openai.chat.completions.create(**params):
                     data = chunk.to_dict()
+                    # Update buffer with new content
+                    for choice in data.get("choices", []):
+                        delta = choice.get("delta", {})
+                        text = delta.get("content", "")
+                        if text:
+                            buffer += text
+
+                            # Look for complete Python code blocks
+                            while True:
+                                match = re.search(
+                                    r"<python>(.*?)</python>", buffer, re.DOTALL
+                                )
+                                if not match:
+                                    break
+
+                                code = match.group(1)
+                                print(f"Extracted python code: {code}")
+
+                                # Remove the extracted code block from buffer
+                                start, end = match.span()
+                                buffer = buffer[:start] + buffer[end:]
+
                     yield f"data: {json.dumps(data)}\n\n"
+
+                # Check for any remaining code in buffer at end of stream
+                while True:
+                    match = re.search(r"<python>(.*?)</python>", buffer, re.DOTALL)
+                    if not match:
+                        break
+                    code = match.group(1)
+                    print(f"Extracted python code at end: {code}")
+                    start, end = match.span()
+                    buffer = buffer[:start] + buffer[end:]
+
                 # signal end of stream
                 yield "data: [DONE]\n\n"
             except Exception as e:

@@ -14,7 +14,7 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:
     raise RuntimeError("DEEPSEEK_API_KEY must be set in environment")
 
-openai = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1")
+openai = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/beta")
 
 app = FastAPI(title="DeepSeek LLM Proxy", version="0.1.0")
 
@@ -65,14 +65,29 @@ The system can only execute code BEFORE you complete the thinking section -- thi
 {messages[-1]["content"]}
         """.strip(),
     }
-    injected_messages = messages[:-1] + [wrapped_final_message]
+    injected_messages = messages[:-1] + [
+        wrapped_final_message,
+        {
+            "role": "assistant",
+            "prefix": True,
+            "content": """
+<think>
+Okay, so apparently I can use Python inside this section. Let me try it:
+<python>
+print("Hello, world!")
+</python>
+<output>
+Hello, world!
+</output>
+Wow, it works! Okay, so let's look at the user's query and see how I can help them using this tool.
+""".strip(),
+        },
+    ]
 
     # Forward parameters directly
     params = body.copy()
     params["messages"] = injected_messages
     params["model"] = "deepseek-reasoner"
-
-    print(f"Sending params: {params}")
 
     stream = params.get("stream", False)
 

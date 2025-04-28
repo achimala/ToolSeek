@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -30,6 +31,8 @@ CLI_STYLE = Style.from_dict(
         "prompt": "bold cyan",
         "cmd": "ansiyellow",
         "handle": "bold fg:#b434eb",
+        "python": "fg:#00af5f",  # green-ish for code
+        "output": "fg:#ffaf00",  # orange-ish for run-output
     }
 )
 
@@ -97,6 +100,52 @@ def handle_slash(cmd: str, hist: ChatHist) -> bool:
     else:
         display(f"Unknown command: {cmd}\n")
     return True
+
+
+class TagStreamer:
+    """Incrementally colourises <python>...</python> and <output>...</output> blocks."""
+
+    TAGS = {"python", "output"}
+
+    def __init__(self):
+        self.buf: list[str] = []  # holds characters crossing chunk boundaries
+        self.active: str | None = None  # current open tag
+
+    def feed(self, text: str) -> list[tuple[str, str | None]]:
+        """
+        Returns a list of (segment, style_name) tuples ready for printing.
+        style_name is None for normal text / reasoning.
+        """
+        self.buf.append(text)
+        data = "".join(self.buf)
+        out: list[tuple[str, str | None]] = []
+        i = 0
+        while i < len(data):
+            if data.startswith("<", i):
+                # try to see if we have a full tag already
+                j = data.find(">", i + 1)
+                if j == -1:  # tag not complete yet → keep in buffer
+                    break
+                tag = data[i + 1 : j].strip().lower().lstrip("/")
+                closing = data[i + 1] == "/"
+                if tag in self.TAGS:
+                    # flush text *before* tag
+                    if i:
+                        out.append((data[:i], self.active))
+                    # update state
+                    self.active = None if closing else tag
+                    # cut consumed piece
+                    data = data[j + 1 :]
+                    i = 0
+                    continue
+            i += 1
+        # whatever is left without incomplete tag
+        if data:
+            out.append((data, self.active))
+            self.buf = []
+        else:
+            self.buf = [data]  # keep remainder (incomplete tag) for next feed
+        return out
 
 
 # ─────────────────────────── main loop ─────────────────────────── #
@@ -171,6 +220,7 @@ def main() -> None:
                 assistant_accum = ""
                 has_finished_reasoning = False
                 has_started_streaming = False
+                tagger = TagStreamer()
                 for line in resp.iter_lines():
                     if not line:
                         continue
@@ -198,13 +248,25 @@ def main() -> None:
                     content = delta.get("content")
 
                     if reasoning:
-                        display(FormattedText([("class:reason", reasoning)]))
+                        for seg, kind in tagger.feed(reasoning):
+                            style_class = (
+                                "python"
+                                if kind == "python"
+                                else "output" if kind == "output" else "reason"
+                            )
+                            display(FormattedText([(f"class:{style_class}", seg)]))
                         assistant_accum += reasoning
                     if content:
                         if not has_finished_reasoning:
                             has_finished_reasoning = True
                             display(FormattedText([("class:reason", "\n")]))
-                        display(content)
+                        for seg, kind in tagger.feed(content):
+                            style_class = (
+                                "python"
+                                if kind == "python"
+                                else "output" if kind == "output" else ""
+                            )
+                            display(FormattedText([(f"class:{style_class}", seg)]))
                         assistant_accum += content
 
                 display("\n")  # newline after assistant finishes

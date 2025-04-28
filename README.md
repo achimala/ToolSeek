@@ -1,13 +1,18 @@
-# Deepseek LLM Proxy
+# ToolSeek
+
+This project attempts to create an o3-style reasoner that can use tools inside its CoT by taking DeepSeek R1 and abusing response prefixing to extract and run Python code within the CoT.
+
+Built by [@anshuchimala](https://x.com/anshuchimala). Credit to [@willccbb](https://x.com/willccbb) for the idea!
 
 This project provides:
+
 1. A FastAPI server that exposes an OpenAI-compatible Chat Completions endpoint (`/v1/chat/completions`) which forwards requests to Deepseek via the OpenAI Python library.
 2. A simple CLI tool (`cli.py`) to interact with the server and stream responses in your terminal.
 
 ## Requirements
 
 - Python 3.7+
-- A Deepseek API key and base URL.
+- A Deepseek API key.
 
 ## Setup
 
@@ -42,30 +47,6 @@ The server will listen on `http://localhost:8000`. It provides:
 
 - `POST /v1/chat/completions` – OpenAI-compatible endpoint for chat completions.
 
-Example non-streaming request:
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-           "model": "gpt-3.5-turbo",
-           "messages": [{"role": "user", "content": "Hello!"}],
-           "stream": false
-         }'
-```
-
-Example streaming request:
-
-```bash
-curl -N -X POST http://localhost:8000/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-           "model": "gpt-3.5-turbo",
-           "messages": [{"role": "user", "content": "Hello!"}],
-           "stream": true
-         }'
-```
-
 ## Using the CLI Tool
 
 Run the interactive CLI to chat with the model:
@@ -77,10 +58,9 @@ python cli.py
 You can set these environment variables to override defaults:
 
 - `LLM_API_URL` – URL of the proxy server endpoint (default: `http://localhost:8000/v1/chat/completions`).
-- `LLM_MODEL` – Model name to use (default: `gpt-3.5-turbo`).
 
 Type your messages when prompted. Responses will stream in real time.
 
-## License
+## Disclaimer
 
-This project is provided as-is. No warranty. Use at your own risk.
+This project is provided as-is. No warranty. Use at your own risk. LLM-generated code will be run on your computer without guardrails; I'm not responsible for any damages caused by this.

@@ -4,6 +4,8 @@ This project attempts to create an o3-style reasoner that can use tools inside i
 
 Built by [@anshuchimala](https://x.com/anshuchimala). Credit to [@willccbb](https://x.com/willccbb) for the idea!
 
+![ToolSeek Demo](Demo.gif)
+
 This project provides:
 
 1. A FastAPI server that exposes an OpenAI-compatible Chat Completions endpoint (`/v1/chat/completions`) which forwards requests to Deepseek via the OpenAI Python library.

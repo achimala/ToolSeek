@@ -140,6 +140,7 @@ Okay, let's start working on the user's query with this. Let me write a first at
         while True:
             buffer = ""
             already_sent = ""
+            maybe_send = ""
             injected_messages = messages[:-1] + [
                 user_message,
                 {
@@ -155,6 +156,7 @@ Okay, let's start working on the user's query with this. Let me write a first at
                 async for chunk in await openai.chat.completions.create(**params):
                     if start_with_code:
                         buffer = "<python>\n"
+                        already_sent = "<python>\n"
                         start_with_code = False
                         yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': '<python>\n', 'content': ''}}]})}\n\n"
                     data = chunk.to_dict()
@@ -208,6 +210,7 @@ Okay, let's start working on the user's query with this. Let me write a first at
                                                 prefix += new_content
                                         break
                                 # Skip until the closing tag is complete
+                                maybe_send += text
                                 continue
                             elif "</think>" in buffer:
                                 # Only yield up to the </think> tag
@@ -227,6 +230,11 @@ Okay, let's start working on the user's query with this. Let me write a first at
                                 needs_restart = True
                                 break
                             else:
+                                if maybe_send:
+                                    yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': maybe_send, 'content': ''}}]})}\n\n"
+                                    already_sent += maybe_send
+                                    prefix += maybe_send
+                                    maybe_send = ""
                                 yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': text, 'content': ''}}]})}\n\n"
                                 already_sent += text
                                 prefix += text

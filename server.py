@@ -79,13 +79,14 @@ This is a system message, not written by the user.
 You have a special Python tool which lets you run Python code by outputting <python> tags inside your think section.
 The code will be extracted and executed, and you will see the output immediately.
 You should use this whenever possible, as it's very fast and precise.
-You don't need to think or plan before using the tool. Use it first, then see the results and iterate.
+You don't need to think or plan out the code before using the tool. Just go straight to <python> tags, then see the results and iterate.
+Don't over-optimize for efficiency, the user doesn't mind waiting. Just try to get to the code as quickly as you can.
+There are no timeouts or penalties in the system, so use the tool liberally and frequently.
 
 IMPORTANT: You must output <python> tags INSIDE your think section, BEFORE escaping to the user answer.
 The system can only execute code BEFORE you complete the thinking section -- this is now part of your reasoning, not part of the answer.
-NEVER output the string "<python>" unless you're using the tool. Otherwise you'll confuse the system.
 
----
+Here is the user query, which you should solve using code execution:
 
 {messages[-1]["content"]}
         """.strip(),
@@ -94,14 +95,29 @@ NEVER output the string "<python>" unless you're using the tool. Otherwise you'l
     prefix = """
 <think>
 Okay, so apparently I can use Python inside this section. Let me try it:
+
 <python>
 print("Hello, world!")
 </python>
 <output>
 Hello, world!
 </output>
-Wow, it works! Okay, so let's look at the user's query and see how I can help them using this tool.
-    """.strip()
+
+Wow, it works! So I can run code in here now, which is very powerful. I should use this as much as I can. Okay, so let's look at the user's query and see how I can help them using code execution.
+
+Since the instructions said to not worry about efficiency too much and use the tool frequently and liberally, I'll do that and see what happens. Let's see if math works:
+<python>
+print(21394872138 + 4723928746)
+</python>
+<output>
+26118800884
+</output>
+
+Perfect, that is much more efficient than me doing it myself by hand. This will save a lot of time, so I should use it as much as possible.
+
+Okay, let's start working on the user's query with this. Let me write a first attempt in <python> tags, then I'll see the results and iterate.
+
+<python>\n""".lstrip()
 
     # Forward parameters directly
     params = body.copy()
@@ -111,11 +127,13 @@ Wow, it works! Okay, so let's look at the user's query and see how I can help th
     py_env: dict[str, object] = {}
     is_thinking = True
     needs_restart = False
+    start_with_code = True
 
     async def event_stream():
         nonlocal is_thinking
         nonlocal needs_restart
         nonlocal prefix
+        nonlocal start_with_code
 
         # Tool loop - we will re-run each time the model produces a tool call.
         # We run the code, update the prefix with the output, then restart with the new prefix.
@@ -135,6 +153,10 @@ Wow, it works! Okay, so let's look at the user's query and see how I can help th
             print(f"Making request with params: {params}")
             try:
                 async for chunk in await openai.chat.completions.create(**params):
+                    if start_with_code:
+                        buffer = "<python>\n"
+                        start_with_code = False
+                        yield f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': '<python>\n', 'content': ''}}]})}\n\n"
                     data = chunk.to_dict()
                     print(f"Received chunk: {data}")
 

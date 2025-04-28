@@ -20,14 +20,16 @@ from prompt_toolkit.styles import Style
 
 # ───────────────────────────── config ───────────────────────────── #
 API_URL = os.getenv("LLM_API_URL", "http://localhost:8000/v1/chat/completions")
-HISTORY_FILE = Path.home() / ".deepseek_cli_history"
+HISTORY_FILE = Path.home() / ".toolseek_cli_history"
 SLASH_CMDS = ("clear", "exit", "quit", "help")
 
 CLI_STYLE = Style.from_dict(
     {
         "reason": "fg:#888888 italic",
+        "explanation": "fg:#888888",
         "prompt": "bold cyan",
         "cmd": "ansiyellow",
+        "handle": "bold fg:#b434eb",
     }
 )
 
@@ -100,8 +102,37 @@ def handle_slash(cmd: str, hist: ChatHist) -> bool:
 # ─────────────────────────── main loop ─────────────────────────── #
 def main() -> None:
     display(
+        FormattedText([("class:prompt", "ToolSeek CLI"), ("", "  (/help for help)\n")])
+    )
+
+    display(
         FormattedText(
-            [("class:prompt", "Deepseek LLM CLI"), ("", "  (/help for help)\n")]
+            [
+                (
+                    "class:explanation",
+                    "This is an experimental DeepSeek wrapper that can execute Python code in its CoT.\n",
+                ),
+                (
+                    "class:explanation",
+                    "Made by ",
+                ),
+                (
+                    "class:handle",
+                    "@anshuchimala",
+                ),
+                (
+                    "class:explanation",
+                    " (credit to ",
+                ),
+                (
+                    "class:handle",
+                    "@willccbb",
+                ),
+                (
+                    "class:explanation",
+                    " for the idea)\n\n",
+                ),
+            ]
         )
     )
 
